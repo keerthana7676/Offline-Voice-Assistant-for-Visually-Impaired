@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Voxsight</string>
+    <string name="accessibility_service_description">VoxSight voice navigation for blind users</string>
+</resources>
