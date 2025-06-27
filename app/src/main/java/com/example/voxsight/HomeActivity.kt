@@ -1,8 +1,5 @@
 package com.example.voxsight
-<<<<<<< HEAD
 
-=======
->>>>>>> bba7ac9d35b6e40518594d7ac700775403bf4046
 import android.Manifest
 import android.os.Handler
 import android.content.Intent
@@ -30,6 +27,10 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.Date
+import android.database.Cursor
+import android.provider.Telephony
+import android.content.ContentValues
+
 
 class HomeActivity : AppCompatActivity(), OnInitListener {
     private lateinit var micIV: ImageView
@@ -37,6 +38,11 @@ class HomeActivity : AppCompatActivity(), OnInitListener {
     private lateinit var speechRecognizer: SpeechRecognizer
     private lateinit var tts: TextToSpeech
     private var isTtsInitialized = false
+    private val SMS_PERMISSION_CODE = 3
+    private val READ_SMS_PERMISSION_CODE = 4
+    private var isWaitingForRecipient = false
+    private var isWaitingForMessage = false
+    private var pendingRecipient: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -119,9 +125,23 @@ class HomeActivity : AppCompatActivity(), OnInitListener {
                 val date = DateFormat.getDateFormat(this).format(Date())
                 speakOut("Today's date is $date")
             }
-            command.contains("messages") || command.contains("sms") -> {
-                // Note: Reading actual messages would require additional permissions
-                speakOut("You have no new messages")
+            command.contains("read messages")|| command.contains("read message") || command.contains("read my messages") -> {
+                Log.d("VoiceCommand", "Read messages command detected")
+                checkReadSmsPermission()
+            }
+            command.contains("send message") || command.contains("text") -> {
+                startInteractiveSmsSending()
+            }
+
+            isWaitingForRecipient -> {
+                processRecipientInput(command)
+            }
+
+            isWaitingForMessage -> {
+                processMessageInput(command)
+            }
+            command.contains("check messages") || command.contains("new messages") -> {
+                checkForNewMessages()
             }
             command.contains("call") -> {
                 val number = extractPhoneNumber(command)
@@ -136,7 +156,216 @@ class HomeActivity : AppCompatActivity(), OnInitListener {
             }
         }
     }
+    private fun startInteractiveSmsSending() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
+            != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.SEND_SMS),
+                SMS_PERMISSION_CODE
+            )
+            speakOut("Please grant SMS send permission first")
+            return
+        }
 
+        speakOut("Please say the recipient's phone number")
+        isWaitingForRecipient = true
+        isWaitingForMessage = false
+        pendingRecipient = null
+    }
+    private fun processRecipientInput(input: String) {
+        val number = extractPhoneNumber(input)
+        if (number != null) {
+            pendingRecipient = number
+            speakOut("You said $number. Now please say your message")
+            isWaitingForRecipient = false
+            isWaitingForMessage = true
+        } else {
+            speakOut("I didn't get a valid phone number. Please try again")
+        }
+    }
+
+    private fun processMessageInput(input: String) {
+        pendingRecipient?.let { recipient ->
+            sendSms(recipient, input)
+            isWaitingForMessage = false
+            pendingRecipient = null
+        } ?: run {
+            speakOut("Error: No recipient found. Please start over")
+            isWaitingForMessage = false
+        }
+    }
+
+    private fun checkReadSmsPermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS)
+            != PackageManager.PERMISSION_GRANTED) {
+            Log.d("Permissions", "Requesting READ_SMS permission")
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.READ_SMS),
+                READ_SMS_PERMISSION_CODE
+            )
+            speakOut("Please grant SMS read permission first")
+        } else {
+            Log.d("Permissions", "READ_SMS permission already granted")
+            readSmsMessages()
+        }
+    }
+    private fun readSmsMessages() {
+        Log.d("SMS", "Attempting to read SMS messages")
+
+        try {
+            val uri = Telephony.Sms.Inbox.CONTENT_URI
+            val projection = arrayOf(
+                Telephony.Sms._ID,
+                Telephony.Sms.ADDRESS,
+                Telephony.Sms.BODY,
+                Telephony.Sms.DATE
+            )
+
+            val selection = "${Telephony.Sms.READ} = 0" // Unread messages
+            val sortOrder = "${Telephony.Sms.DATE} DESC LIMIT 1" // Get only the latest message
+
+            val cursor = contentResolver.query(
+                uri,
+                projection,
+                selection,
+                null,
+                sortOrder
+            )
+
+            cursor?.use {
+                if (it.count == 0) {
+                    Log.d("SMS", "No unread messages found")
+                    speakOut("You have no new messages")
+                    return
+                }
+
+                if (it.moveToFirst()) {
+                    val address = it.getString(it.getColumnIndexOrThrow(Telephony.Sms.ADDRESS))
+                    val body = it.getString(it.getColumnIndexOrThrow(Telephony.Sms.BODY))
+                    val messageId = it.getLong(it.getColumnIndexOrThrow(Telephony.Sms._ID))
+
+                    val formattedMessage = "From ${formatPhoneNumber(address)}, Message is '$body'"
+                    Log.d("SMS", "Latest message: $formattedMessage")
+
+                    speakOut(formattedMessage)
+                    markMessageAsRead(messageId)
+                }
+            } ?: run {
+                Log.e("SMS", "Cursor is null")
+                speakOut("Could not access your messages")
+            }
+        } catch (e: SecurityException) {
+            Log.e("SMS", "Security Exception", e)
+            speakOut("Permission denied to read messages")
+        } catch (e: Exception) {
+            Log.e("SMS", "Error reading messages", e)
+            speakOut("Error reading messages")
+        }
+    }
+    private fun formatPhoneNumber(number: String): String {
+        return if (number.matches(Regex("^\\d{10}$"))) {
+            "(${number.substring(0, 3)}) ${number.substring(3, 6)}-${number.substring(6)}"
+        } else {
+            number
+        }
+    }
+    private fun markMessageAsRead(messageId: Long) {
+        try {
+            val values = ContentValues().apply {
+                put(Telephony.Sms.READ, true)
+            }
+            contentResolver.update(
+                Telephony.Sms.CONTENT_URI,
+                values,
+                "${Telephony.Sms._ID} = ?",
+                arrayOf(messageId.toString())
+            )
+            Log.d("SMS", "Marked message $messageId as read")
+        } catch (e: Exception) {
+            Log.e("SMS", "Error marking message as read", e)
+        }
+    }
+    private fun processSendSmsCommand(command: String) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
+            != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.SEND_SMS),
+                SMS_PERMISSION_CODE
+            )
+            speakOut("Please grant SMS send permission first")
+            return
+        }
+
+        // Extract phone number and message from command
+        val parts = command.split("to", "message").map { it.trim() }
+        if (parts.size < 3) {
+            speakOut("Please specify both recipient and message content")
+            return
+        }
+
+        val number = extractPhoneNumber(parts[1])
+        val message = parts[2]
+
+        if (number == null) {
+            speakOut("I couldn't find a valid phone number")
+            return
+        }
+
+        sendSms(number, message)
+    }
+
+    private fun sendSms(number: String, message: String) {
+        try {
+            val smsManager = SmsManager.getDefault()
+            smsManager.sendTextMessage(number, null, message, null, null)
+            speakOut("Message sent successfully to $number")
+        } catch (e: Exception) {
+            speakOut("Failed to send message. ${e.localizedMessage}")
+        }
+    }
+    private fun extractPhoneNumber(command: String): String? {
+        // Remove all non-digit characters except '+'
+        val digitsOnly = command.replace(Regex("[^0-9+]"), "")
+
+        // Check if it looks like a phone number
+        return if (digitsOnly.matches(Regex("^\\+?[0-9]{7,15}$"))) {
+            digitsOnly
+        } else {
+            null
+        }
+    }
+    private fun checkForNewMessages() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS)
+            != PackageManager.PERMISSION_GRANTED) {
+            checkReadSmsPermission()
+            return
+        }
+
+        val cursor: Cursor? = try {
+            contentResolver.query(
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(Telephony.Sms._ID),
+                "${Telephony.Sms.READ} = ?",
+                arrayOf("0"),
+                null
+            )
+        } catch (e: Exception) {
+            Log.e("SMS", "Error checking messages", e)
+            null
+        }
+
+        val unreadCount = cursor?.count ?: 0
+        cursor?.close()
+
+        if (unreadCount > 0) {
+            speakOut("You have $unreadCount new messages. Say 'read messages' to hear the latest unread message.")
+        } else {
+            speakOut("You have no new messages")
+        }
+    }
     private fun getBatteryPercentage(): Int {
         val batteryStatus: Intent? = IntentFilter(Intent.ACTION_BATTERY_CHANGED).let { ifilter ->
             registerReceiver(null, ifilter)
@@ -148,11 +377,7 @@ class HomeActivity : AppCompatActivity(), OnInitListener {
         } ?: -1
     }
 
-    private fun extractPhoneNumber(command: String): String? {
-        // Simple extraction - in a real app you'd want more sophisticated parsing
-        return command.replace("call", "").trim()
-            .takeIf { it.matches(Regex("^[0-9+ ]+\$")) }
-    }
+
 
     private fun makePhoneCall(number: String) {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
@@ -218,18 +443,38 @@ class HomeActivity : AppCompatActivity(), OnInitListener {
                     speakOut("Phone call permission denied")
                 }
             }
+            SMS_PERMISSION_CODE -> { // Send SMS permission
+                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    speakOut("SMS permission granted. Please repeat your message command.")
+                } else {
+                    speakOut("SMS permission denied")
+                }
+            }
+            READ_SMS_PERMISSION_CODE -> {
+                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    Log.d("Permissions", "READ_SMS permission granted")
+                    speakOut("SMS permission granted. Reading messages now.")
+                    readSmsMessages()
+                } else {
+                    Log.d("Permissions", "READ_SMS permission denied")
+                    speakOut("Cannot read messages without permission. Please grant SMS permission in settings.")
+                }
+            }
         }
     }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             val result = tts.setLanguage(Locale.getDefault())
-            isTtsInitialized = if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+            isTtsInitialized = if (result == TextToSpeech.LANG_MISSING_DATA ||
+                result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.e("TTS", "Language not supported")
                 false
             } else {
                 true
             }
         } else {
+            Log.e("TTS", "Initialization failed")
             isTtsInitialized = false
         }
     }
