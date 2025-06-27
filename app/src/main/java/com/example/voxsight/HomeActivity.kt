@@ -1,5 +1,8 @@
 package com.example.voxsight
+<<<<<<< HEAD
 
+=======
+>>>>>>> bba7ac9d35b6e40518594d7ac700775403bf4046
 import android.Manifest
 import android.os.Handler
 import android.content.Intent
